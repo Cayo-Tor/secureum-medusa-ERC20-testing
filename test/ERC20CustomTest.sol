@@ -3,17 +3,36 @@ import "../contracts/ERC20Burn.sol";
 import "./helper.sol";
 
 
-/// @notice Run with medusa fuzz --target test/ERC20CustomTest.sol --deployment-order ExternalTest
+/// @notice Run with medusa fuzz --target test/ERC20CustomTest.sol --deployment-order Deployer
 
+/*//////////////////////////////////////////////////////////////
+                DEPLOYER CONTRACT FOR INIT
+//////////////////////////////////////////////////////////////*/
+contract Deployer is PropertiesAsserts {
+    Token token;
+    User alice;
+
+    constructor() {
+        token = new Token();
+        alice = new User(token);
+
+        // Init token supply
+        uint256 userAmount = 100000;
+        uint256 contractAmount = 10000000;
+        token._init(address(alice), userAmount, contractAmount);
+    }
+}
+
+/*//////////////////////////////////////////////////////////////
+                INTERNAL TESTING TOKEN
+//////////////////////////////////////////////////////////////*/
 contract Token is ERC20Burn, PropertiesAsserts {
     bool _init_switch; // False by default
     address alice;
-    address externalTester;
-    address medusa;
 
     /// @notice Function Signatures
     /// @dev These are used to identify call origins and perform appropriate invariant checks
-    bytes4 private testTransferFromSig = bytes4(keccak256("testTransferFrom(uint)"));
+    bytes4 private testTransferFromSig = bytes4(keccak256("testTransferFrom(address,uint256)"));
     bytes4 private testTransferSig = bytes4(keccak256("testTransfer(address,uint256)"));
     bytes4 private testBurnSig = bytes4(keccak256("testBurn(uint256)"));
     bytes4 private testMintSig = bytes4(keccak256("testMint(address,uint256)"));
@@ -23,19 +42,16 @@ contract Token is ERC20Burn, PropertiesAsserts {
     /// @dev
     /// 1. Callable once
     /// 2. Sets some initial chain state (e.g balances)
-    function _init(address _alice, address _externalTester, address _medusa, uint256 userAmount, uint256 contractAmount) external {
+    function _init(address _alice, uint256 userAmount, uint256 contractAmount) external {
         require(_init_switch == false);
         _init_switch = true;
 
         // Store testing addresses
         alice = _alice;
-        externalTester = _externalTester;
-        medusa = _medusa;
 
         // Init contract state
         _mint(alice, userAmount);               // 100
-        _mint(externalTester, userAmount);      // 100
-        _mint(medusa, userAmount);              // 100
+        _mint(msg.sender, userAmount);          // 100
         _mint(address(this), contractAmount);   // 1000
     }
 
@@ -117,23 +133,6 @@ contract Token is ERC20Burn, PropertiesAsserts {
                     TEST EXECUTION & SYSTEM ENTRY POINTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice This is used to ensure balance is handled safely
-    /// @dev Assumptions:
-    /// 1. Conditions of balanceUpdateCheck()
-    /// 2. Inputs can be bounded by clampAmount()
-    function testTransfer(address to, uint256 amount) public checkSupply(amount) {
-        amount = clampAmount(msg.sender, to, amount);
-
-        uint256 balBefore_to = balanceOf[to];
-        uint256 balBefore_from = balanceOf[msg.sender];
-
-        // Perform transfer
-        transfer(to, amount);
-
-        // Check transfer
-        balanceUpdateCheck(msg.sender, to, balBefore_from, balBefore_to);
-    }
-
     /// @notice This test ensures that allowance is correctly incremented/decremented
     /// @dev Assumptions:
     /// 1. Spender's allowance should equal X
@@ -143,6 +142,66 @@ contract Token is ERC20Burn, PropertiesAsserts {
         approve(spender, amount);
         assertEq(amount, allowance[msg.sender][spender], "Allowance not updated correctly");
         
+    }
+    /// @notice This is used to ensure balance is handled safely
+    /// @dev Assumptions:
+    /// 1. Conditions of balanceUpdateCheck()
+    /// 2. Inputs can be bounded by clampAmount()
+    function testTransfer(address to, uint256 amount) public checkSupply(amount) {
+        amount = clampAmount(msg.sender, to, amount);
+
+        uint256 balBefore_from = balanceOf[msg.sender];
+        uint256 balBefore_to = balanceOf[to];
+
+        // Perform transfer
+        transfer(to, amount);
+
+        // Check transfer
+        balanceUpdateCheck(msg.sender, to, balBefore_from, balBefore_to);
+    }
+
+    /// @notice This is used to ensure balance is handled safely
+    /// @dev Assumptions
+    /// 1. Amount X should not exceed Allowance
+    /// 2. Conditions of balanceUpdateCheck()
+    /// 4. Allowance should be decreased by amount X
+    /// 6. Allowance should not be decreased by amount X if previously set to type(uint256).max
+    /// 5. Inputs can be bounded by clampAmount()
+    function testTransferFrom(address to, uint256 amount) public {
+        // Get balances before
+        uint balBefore_from = balanceOf[address(alice)];
+        uint balBefore_to = balanceOf[to];
+
+        // Get approval before
+        uint allowanceBefore = allowance[address(alice)][msg.sender];   // Spender parameter (Medusa)
+
+        // Clamp amount to Alice's balance and Tester's allowance
+        //amount = clampAmount(address(alice), to, amount);
+
+        // Perform transferFrom()
+        bool success = transferFrom(address(alice), to, amount);
+
+        // Check allowance satisfies amount
+        assertLte(amount, allowanceBefore, "Amount Exceeded Allowance");
+
+        uint256 allowanceAfter = allowance[address(alice)][msg.sender];
+
+        // Check allowance is updated correctly
+        // Allowances == type(uint256).max are not updated
+        if (allowanceBefore != type(uint256).max) {
+            assertEq(allowanceBefore, allowanceAfter + amount, "Allowance not decreased");
+        } else {
+            assertEq(allowanceBefore, allowanceAfter, "Allowance was decreased - despite being equal to type(uint256).max");
+        }
+
+        // Check transfer
+        balanceUpdateCheck(
+            address(alice), // From parameter (Alice User)
+            to,
+            balBefore_from,
+            balBefore_to
+        );
+
     }
 
     /// @notice This test ensures that tokens are actually burned
@@ -168,82 +227,17 @@ contract Token is ERC20Burn, PropertiesAsserts {
 }
 
 /*//////////////////////////////////////////////////////////////
-                    FOR EXTNERAL TESTING
+                ALICE FOR EXTNERAL TESTING
 //////////////////////////////////////////////////////////////*/
-
-contract ExternalTest is PropertiesAsserts {
-    Token token;
-    User alice;
-
-    constructor() {
-        token = new Token();
-        alice = new User(token, address(this));
-
-        // Init token supply
-        uint256 userAmount = 100000;
-        uint256 contractAmount = 10000000;
-        token._init(address(alice), address(this), msg.sender, userAmount, contractAmount);
-    }
-
-    /// @notice This is used to ensure balance is handled safely
-    /// @dev Assumptions
-    /// 1. Amount X should not exceed Allowance
-    /// 2. Conditions of balanceUpdateCheck()
-    /// 4. Allowance should be decreased by amount X
-    /// 6. Allowance should not be decreased by amount X if previously set to type(uint256).max
-    /// 5. Inputs can be bounded by clampAmount()
-    function testTransferFrom(uint amount, address to) public {
-        // Get balances before
-        uint balBefore_from = token.balanceOf(address(alice));
-        uint balBefore_to = token.balanceOf(to);
-
-        // Get approval before
-        uint approvedAmount = token.allowance(
-            address(alice), // From parameter (Alice User)
-            address(this)   // Spender parameter (External Tester e.g This address)
-        );
-
-        // Clamp amount to Alice's balance and Tester's allowance
-        amount = token.clampAmount(address(alice), to, amount);
-
-        // Perform transferFrom()
-        token.transferFrom(address(alice), to, amount);
-
-        // Check allowance satisfies amount
-        assertLte(amount, approvedAmount, "Amount Exceeded Allowance");
-
-        uint256 allowanceAfter = token.allowance(address(alice), address(this));
-
-        // Check allowance is updated correctly
-        // Allowances == type(uint256).max are not updated
-        if (approvedAmount != type(uint256).max) {
-            assertEq(allowanceAfter, approvedAmount - amount, "Allowance not decreased");
-        } else {
-            assertEq(allowanceAfter, approvedAmount, "Allowance was decreased - despite being equal to type(uint256).max");
-        }
-
-        // Check transfer
-        token.balanceUpdateCheck(
-            address(alice), // From parameter (Alice User)
-            to,
-            balBefore_from,
-            balBefore_to
-        );
-
-    }
-}
-
 contract User {
     Token token;
-    address immutable externalTester;
 
-    constructor(Token _token, address _externalTester) {
+    constructor(Token _token) {
         token = _token;
-        externalTester = _externalTester;
     }
 
     function approve(uint256 amount) public {
-        token.testApprove(externalTester, amount);
+        token.testApprove(msg.sender, amount);
     }
 
     function transfer(address to, uint amount) public {
