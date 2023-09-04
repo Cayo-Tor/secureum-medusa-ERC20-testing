@@ -8,7 +8,7 @@ import "./helper.sol";
 /*//////////////////////////////////////////////////////////////
                 DEPLOYER CONTRACT FOR INIT
 //////////////////////////////////////////////////////////////*/
-contract Deployer is PropertiesAsserts {
+contract Deployer {
     Token token;
     User alice;
 
